@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use cloud_objects::{
-    cloud_object::{GenericCloudObject, GenericServerObject, GenericStringModel, JsonObjectType},
-    ids::GenericStringObjectId,
+use cloud_objects::cloud_object::{
+    GenericCloudObject, GenericServerObject, GenericStringModel, JsonObjectType,
 };
+use cloud_objects::ids::GenericStringObjectId;
 use serde::{Deserialize, Serialize};
 
 use crate::{AgentConfigSnapshot, JsonModel, JsonSerializer};
@@ -34,6 +34,7 @@ impl AgentConfig {
         AgentConfigSnapshot {
             name: Some(self.name.clone()),
             environment_id: None,
+            runner_id: None,
             model_id: self.base_model_id.clone(),
             base_prompt: self.base_prompt.clone(),
             mcp_servers: self.mcp_servers.clone().map(|m| m.into_iter().collect()),

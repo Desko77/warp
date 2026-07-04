@@ -5,6 +5,7 @@ use std::sync::Arc;
 use ai::skills::{ParsedSkill, SkillProvider, SkillScope};
 use itertools::Itertools;
 use ui_components::lightbox::{LightboxImage, LightboxImageSource};
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 #[cfg(feature = "local_fs")]
 use warpui::assets::asset_cache::AssetSource;
 use warpui::elements::{Empty, MouseStateHandle};
@@ -16,8 +17,8 @@ use super::{
     collect_visual_markdown_lightbox_collection, compute_visual_section_width,
     image_tooltip_handles_for_group, inline_image_source_label,
     is_supported_blocklist_image_source, lightbox_trigger_for_section, query_prefix_highlight_len,
-    render_scrollable_collapsible_content, text_sections_with_indices, CollapsibleElementState,
-    CollapsibleExpansionState, VisualMarkdownLightboxCollection,
+    render_scrollable_collapsible_content, text_sections_with_indices, warping_footer_height,
+    CollapsibleElementState, CollapsibleExpansionState, VisualMarkdownLightboxCollection,
 };
 use crate::ai::agent::{
     AIAgentInput, AIAgentTextSection, AgentOutputImage, AgentOutputImageLayout,
@@ -31,7 +32,7 @@ fn query_prefix_highlight_len_highlights_invoke_skill_inputs() {
     let input = AIAgentInput::InvokeSkill {
         context: Arc::new([]),
         skill: ParsedSkill {
-            path: PathBuf::from("/tmp/.agents/skills/review-pr/SKILL.md"),
+            path: LocalOrRemotePath::Local(PathBuf::from("/tmp/.agents/skills/review-pr/SKILL.md")),
             name: "review-pr".to_string(),
             description: "Review a pull request.".to_string(),
             content: String::new(),
@@ -158,6 +159,26 @@ fn render_scrollable_collapsible_content_returns_none_when_collapsed() {
         content.is_none(),
         "Expected no rendered content when collapsible state is collapsed",
     );
+}
+
+#[test]
+fn warping_footer_height_reserves_a_line_for_the_secondary_element() {
+    // Regression: the warping indicator's footer is a fixed-height, clipped
+    // container. When an agent tip (or fallback-model explanation) is present it
+    // renders on a second line, so the footer must be taller than the
+    // single-line case — otherwise the clip (added to keep action chips from
+    // overflowing narrow panes) hides the tip entirely.
+    let font_size = 13.;
+    let without_tip = warping_footer_height(font_size, false);
+    let with_tip = warping_footer_height(font_size, true);
+
+    assert!(
+        with_tip > without_tip,
+        "footer with a secondary element ({with_tip}) should be taller than without ({without_tip})",
+    );
+    // The extra room must cover the secondary line: its font size
+    // (monospace_font_size - 3) plus the 1px top margin on the tip container.
+    assert_eq!(with_tip - without_tip, (font_size - 3.) + 1.);
 }
 
 #[test]
@@ -290,6 +311,7 @@ fn blocklist_image_asset_source_uses_cached_resolution_when_available() {
         "diagram.png".to_string(),
         Some(AssetSource::LocalFile {
             path: cached_path.clone(),
+            content_version: None,
         }),
     )]);
 
@@ -300,7 +322,7 @@ fn blocklist_image_asset_source_uses_cached_resolution_when_available() {
     );
 
     match resolved {
-        Some(AssetSource::LocalFile { path }) => assert_eq!(path, cached_path),
+        Some(AssetSource::LocalFile { path, .. }) => assert_eq!(path, cached_path),
         other => panic!("expected cached local file asset source, got {other:?}"),
     }
 }

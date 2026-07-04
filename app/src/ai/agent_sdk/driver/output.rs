@@ -286,6 +286,8 @@ pub mod text {
                 },
                 // TODO(AGENT-2281): implement
                 AIAgentActionResultType::RequestComputerUse(_result) => Ok(()),
+                AIAgentActionResultType::StartRecording(_)
+                | AIAgentActionResultType::StopRecording(_) => Ok(()),
                 AIAgentActionResultType::FetchConversation(result) => match result {
                     FetchConversationResult::Success { directory_path } => {
                         writeln!(w, "Fetched conversation to {directory_path}")
@@ -302,6 +304,8 @@ pub mod text {
                 AIAgentActionResultType::AskUserQuestion(_) => Ok(()),
                 // RunAgents is a desktop-client-only action; not used in the SDK.
                 AIAgentActionResultType::RunAgents(_) => Ok(()),
+                // No user-visible payload to emit.
+                AIAgentActionResultType::WaitForEvents(_) => Ok(()),
             },
         }
     }
@@ -407,6 +411,12 @@ pub mod text {
                     AIAgentActionType::RequestComputerUse(request) => {
                         writeln!(w, "Requesting computer use: {}", request.task_summary)?;
                     }
+                    AIAgentActionType::StartRecording { .. } => {
+                        writeln!(w, "Starting recording")?;
+                    }
+                    AIAgentActionType::StopRecording { recording_id } => {
+                        writeln!(w, "Stopping recording {recording_id}")?;
+                    }
                     AIAgentActionType::ReadSkill(request) => {
                         writeln!(w, "Reading skill: {}", request.skill)?;
                     }
@@ -428,6 +438,7 @@ pub mod text {
                     AIAgentActionType::AskUserQuestion { .. } => (),
                     // RunAgents is desktop-client-only; SDK driver renders nothing.
                     AIAgentActionType::RunAgents(_) => (),
+                    AIAgentActionType::WaitForEvents { .. } => (),
                 },
                 AIAgentOutputMessageType::TodoOperation(operation) => match operation {
                     TodoOperation::UpdateTodos { todos } => {
@@ -1091,7 +1102,9 @@ pub mod json {
                     // TODO(AGENT-2281): implement
                     AIAgentActionType::RequestComputerUse(_) => None,
                     // Internal or non-CLI tool calls: skip them
-                    AIAgentActionType::SuggestNewConversation { .. }
+                    AIAgentActionType::StartRecording { .. }
+                    | AIAgentActionType::StopRecording { .. }
+                    | AIAgentActionType::SuggestNewConversation { .. }
                     | AIAgentActionType::SuggestPrompt { .. }
                     | AIAgentActionType::InitProject
                     | AIAgentActionType::OpenCodeReview
@@ -1109,6 +1122,7 @@ pub mod json {
                     // RunAgents is desktop-client-only; SDK has no JSON
                     // representation for it.
                     AIAgentActionType::RunAgents(_) => None,
+                    AIAgentActionType::WaitForEvents { .. } => None,
                 },
                 AIAgentOutputMessageType::TodoOperation(operation) => match operation {
                     TodoOperation::UpdateTodos { todos } => Some(JsonMessage::UpdateTodos {
@@ -1335,8 +1349,8 @@ fn format_agent_text<W: Write>(text: &AIAgentText, w: &mut W) -> io::Result<()> 
                 }
 
                 match source {
-                    Some(CodeSource::ProjectRules { path }) => {
-                        writeln!(w, " rules_path={}", path.display())?;
+                    Some(CodeSource::ProjectRules { location }) => {
+                        writeln!(w, " rules_path={}", location.display_path())?;
                     }
                     Some(CodeSource::Link {
                         path,
@@ -1355,8 +1369,8 @@ fn format_agent_text<W: Write>(text: &AIAgentText, w: &mut W) -> io::Result<()> 
 
                         writeln!(w)?;
                     }
-                    Some(CodeSource::Skill { path, .. }) => {
-                        writeln!(w, " skill_path={}", path.display())?;
+                    Some(CodeSource::Skill { location, .. }) => {
+                        writeln!(w, " skill_path={}", location.display_path())?;
                     }
                     Some(CodeSource::AIAction { .. })
                     | Some(CodeSource::New { .. })

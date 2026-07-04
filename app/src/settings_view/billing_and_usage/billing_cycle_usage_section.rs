@@ -20,7 +20,7 @@ use crate::auth::{AuthManager, AuthStateProvider};
 use crate::menu::{self, Menu, MenuItem, MenuItemFields};
 use crate::settings_view::admin_actions::AdminActions;
 use crate::settings_view::billing_and_usage::billing_cycle_usage_common::{
-    filter_legacy_buckets, has_non_viewer_data, BillingUsageMouseStates,
+    filter_legacy_buckets, has_non_viewer_data, legend_cost_types, BillingUsageMouseStates,
 };
 use crate::settings_view::billing_and_usage::billing_cycle_usage_rows::{
     has_cloud_usage, render_own_usage_solo_row, render_own_usage_with_workspace_row, render_rows,
@@ -339,7 +339,6 @@ impl BillingCycleUsageSectionView {
         column.add_child(self.render_header(Some(workspace), &visibility, appearance, app));
         column.add_child(
             Container::new(render_own_usage_with_workspace_row(
-                workspace,
                 &entries,
                 &self.row_mouse_states,
                 appearance,
@@ -553,22 +552,10 @@ impl BillingCycleUsageSectionView {
         appearance: &Appearance,
     ) -> Option<Box<dyn Element>> {
         let summary = self.current_summary(workspace)?;
-        if summary.entries.is_empty() {
-            return None;
-        }
-
-        let mut present_buckets = Vec::new();
-        for cost_type in [
-            AiCreditsUsageAndCostType::BaseLimit,
-            AiCreditsUsageAndCostType::BonusGrant,
-            AiCreditsUsageAndCostType::Payg,
-            AiCreditsUsageAndCostType::AmbientBonusGrant,
-            AiCreditsUsageAndCostType::Aggregate,
-        ] {
-            if summary.entries.iter().any(|e| e.cost_type == cost_type) {
-                present_buckets.push(cost_type);
-            }
-        }
+        // Only list buckets that actually contribute to the stacked bars: drop
+        // legacy buckets and cost types with no usage, so the legend never
+        // shows a bucket (e.g. "Base") that has zero credits in the data.
+        let present_buckets = legend_cost_types(&summary.entries);
         if present_buckets.is_empty() {
             return None;
         }

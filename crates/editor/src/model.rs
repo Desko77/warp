@@ -4,9 +4,9 @@ use itertools::{Either, Itertools};
 use line_ending::LineEnding;
 use string_offset::{ByteOffset, CharOffset};
 use vec1::{Vec1, vec1};
-use warpui::clipboard::ClipboardContent;
-use warpui::elements::ListIndentLevel;
-use warpui::{AppContext, Entity, ModelAsRef, ModelContext, ModelHandle};
+use warpui_core::clipboard::ClipboardContent;
+use warpui_core::elements::ListIndentLevel;
+use warpui_core::{AppContext, Entity, ModelAsRef, ModelContext, ModelHandle};
 
 use crate::content::anchor::Anchor;
 use crate::content::buffer::{
@@ -898,6 +898,24 @@ pub trait RichTextEditorModel: CoreEditorModel {
 
     fn reset_with_markdown(&mut self, markdown: &str, ctx: &mut ModelContext<Self::T>) {
         let state = InitialBufferState::markdown(markdown);
+
+        self.update_content(
+            |mut content, ctx| {
+                content.buffer().reset_undo_stack();
+                content.apply_edit(
+                    BufferEditAction::ReplaceWith(state),
+                    EditOrigin::SystemEdit,
+                    self.buffer_selection_model().clone(),
+                    ctx,
+                );
+            },
+            ctx,
+        );
+        self.validate(ctx);
+    }
+
+    fn reset_with_ipynb(&mut self, ipynb: &str, ctx: &mut ModelContext<Self::T>) {
+        let state = InitialBufferState::ipynb(ipynb);
 
         self.update_content(
             |mut content, ctx| {

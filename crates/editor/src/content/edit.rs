@@ -15,14 +15,14 @@ use urlocator::{UrlLocation, UrlLocator};
 use vec1::Vec1;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::theme::Fill as ThemeFill;
-use warpui::assets::asset_cache::{AssetCache, AssetSource, AssetState};
-use warpui::fonts::Weight;
-use warpui::image_cache::ImageType;
-use warpui::text::char_slice;
-use warpui::text::point::Point;
-use warpui::text_layout::{StyleAndFont, TextAlignment};
-use warpui::units::{IntoPixels, Pixels};
-use warpui::{AppContext, SingletonEntity};
+use warpui_core::assets::asset_cache::{AssetCache, AssetSource, AssetState};
+use warpui_core::fonts::Weight;
+use warpui_core::image_cache::ImageType;
+use warpui_core::text::char_slice;
+use warpui_core::text::point::Point;
+use warpui_core::text_layout::{StyleAndFont, TextAlignment};
+use warpui_core::units::{IntoPixels, Pixels};
+use warpui_core::{AppContext, SingletonEntity};
 
 use super::buffer::{StyledBufferBlock, StyledBufferRun, StyledTextBlock};
 use super::mermaid_diagram::{mermaid_asset_source, mermaid_diagram_layout};
@@ -66,6 +66,7 @@ pub(crate) fn layout_mermaid_block_for_test(
 ///
 /// Supports the following markdown image formats per the CommonMark spec:
 /// https://spec.commonmark.org/0.31.2/#images
+/// - Inline data: base64 `data:` URIs (e.g. notebook image outputs)
 /// - URLs: `http://` or `https://` prefixed paths
 /// - Absolute paths: paths starting with `/`
 /// - Relative paths: all other paths, resolved relative to the document location
@@ -76,11 +77,14 @@ pub fn resolve_asset_source_relative_to_directory(
     source: &str,
     base_directory: Option<&Path>,
 ) -> AssetSource {
-    if source.starts_with("http://") || source.starts_with("https://") {
+    if let Some(data_uri_source) = asset_cache::data_uri_source(source) {
+        data_uri_source
+    } else if source.starts_with("http://") || source.starts_with("https://") {
         asset_cache::url_source(source)
     } else if source.starts_with("/") {
         AssetSource::LocalFile {
             path: source.to_string(),
+            content_version: None,
         }
     } else {
         let resolved_path = if let Some(base_directory) = base_directory {
@@ -94,6 +98,7 @@ pub fn resolve_asset_source_relative_to_directory(
                 Ok(canon) => canon.to_string_lossy().to_string(),
                 Err(_) => resolved_path.to_string_lossy().to_string(),
             },
+            content_version: None,
         }
     }
 }
@@ -108,11 +113,14 @@ pub fn resolve_asset_source_relative_to_directory(
     source: &str,
     _base_directory: Option<&Path>,
 ) -> AssetSource {
-    if source.starts_with("http://") || source.starts_with("https://") {
+    if let Some(data_uri_source) = asset_cache::data_uri_source(source) {
+        data_uri_source
+    } else if source.starts_with("http://") || source.starts_with("https://") {
         asset_cache::url_source(source)
     } else {
         AssetSource::LocalFile {
             path: source.to_string(),
+            content_version: None,
         }
     }
 }

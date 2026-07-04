@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use cloud_objects::{
-    cloud_object::{GenericCloudObject, GenericServerObject, GenericStringModel, JsonObjectType},
-    ids::GenericStringObjectId,
+use cloud_objects::cloud_object::{
+    GenericCloudObject, GenericServerObject, GenericStringModel, JsonObjectType,
 };
+use cloud_objects::ids::GenericStringObjectId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use warp_cli::agent::Harness;
 
@@ -22,6 +22,10 @@ pub struct AgentConfigSnapshot {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_id: Option<String>,
+    /// Runner ID (JsonRunner GSO) used to override the environment's compute
+    /// config (docker image, instance shape, setup commands).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +134,7 @@ impl AgentConfigSnapshot {
         let Self {
             name,
             environment_id,
+            runner_id,
             model_id,
             base_prompt,
             mcp_servers,
@@ -143,6 +148,7 @@ impl AgentConfigSnapshot {
 
         name.is_none()
             && environment_id.is_none()
+            && runner_id.is_none()
             && model_id.is_none()
             && base_prompt.is_none()
             && mcp_servers.is_none()

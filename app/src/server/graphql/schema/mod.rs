@@ -1,7 +1,6 @@
 pub mod util;
-pub use util::{action_type_to_gql_action_type, object_action_history_from_gql};
-
 use anyhow::{bail, Result};
+pub use util::{action_type_to_gql_action_type, object_action_history_from_gql};
 use warp_graphql::generic_string_object::GenericStringObjectFormat;
 use warp_graphql::mutations::update_generic_string_object::{
     GenericStringObjectUpdate, UpdateGenericStringObjectResult,
@@ -88,6 +87,9 @@ pub fn update_generic_string_object_result_to_update_result(
                             boxed_rejected_generic_string_object::<ServerScheduledAmbientAgent>(
                                 rejected.conflicting_generic_string_object,
                             )?
+                        }
+                        GenericStringObjectFormat::Unknown => {
+                            bail!("conflicting generic string object has unknown format")
                         }
                     };
                     Ok(UpdateCloudObjectResult::Rejected { object: boxed })

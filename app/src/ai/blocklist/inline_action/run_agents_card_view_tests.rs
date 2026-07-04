@@ -6,6 +6,7 @@ use ai::agent::action_result::{
     RunAgentsResult,
 };
 use ai::skills::SkillReference;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 
 use super::RunAgentsEditState;
 use crate::ai::blocklist::inline_action::orchestration_controls::OrchestrationEditState;
@@ -223,7 +224,9 @@ fn to_request_round_trips_request_fields() {
         },
         vec![
             SkillReference::BundledSkillId("writing-pr-descriptions".to_string()),
-            SkillReference::Path(PathBuf::from("/tmp/skill/SKILL.md")),
+            SkillReference::Path(LocalOrRemotePath::Local(PathBuf::from(
+                "/tmp/skill/SKILL.md",
+            ))),
         ],
     );
     req.plan_id = "plan-1".to_string();
@@ -300,6 +303,26 @@ mod format_terminal_state_tests {
         let (label, kind) = format_terminal_state(&result);
         assert_eq!(label, "Spawned 2 of 3 agents");
         assert!(matches!(kind, StatusKind::Mixed));
+    }
+
+    #[test]
+    fn all_failed_uses_failure_status_not_mixed() {
+        let result = launched_result(vec![
+            failed("a", "boom"),
+            failed("b", "boom"),
+            failed("c", "boom"),
+        ]);
+        let (label, kind) = format_terminal_state(&result);
+        assert_eq!(label, "Failed to spawn 3 agents");
+        assert!(matches!(kind, StatusKind::Failure));
+    }
+
+    #[test]
+    fn single_failed_uses_singular_failure_label() {
+        let result = launched_result(vec![failed("a", "boom")]);
+        let (label, kind) = format_terminal_state(&result);
+        assert_eq!(label, "Failed to spawn agent");
+        assert!(matches!(kind, StatusKind::Failure));
     }
 
     #[test]

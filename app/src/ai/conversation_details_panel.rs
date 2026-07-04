@@ -29,6 +29,8 @@ use warpui::{
 };
 
 use crate::ai::agent::api::ServerConversationToken;
+#[cfg(not(target_family = "wasm"))]
+use crate::ai::agent::conversation::AIAgentHarness;
 use crate::ai::agent::conversation::{
     AIConversation, AIConversationId, ConversationStatus, StatusColorStyle,
 };
@@ -70,7 +72,7 @@ use crate::view_components::copyable_text_field::{
 };
 use crate::view_components::DismissibleToast;
 use crate::workspace::{ForkedConversationDestination, ToastStack, WorkspaceAction};
-use crate::workspaces::user_profiles::UserProfiles;
+use crate::workspaces::user_profiles::{UserProfileWithUID, UserProfiles};
 
 const FIELD_SPACING: f32 = 16.0;
 const HEADER_SPACING: f32 = 12.0;
@@ -182,6 +184,24 @@ impl PrincipalInfo {
         let first_char = uid.chars().next().unwrap_or('?').to_uppercase().to_string();
         Self::new(first_char, None)
     }
+
+    fn from_user_profile(profile: &UserProfileWithUID) -> Self {
+        let display_name = profile
+            .display_name
+            .as_ref()
+            .filter(|name| !name.is_empty())
+            .or_else(|| (!profile.email.is_empty()).then_some(&profile.email))
+            .cloned()
+            .unwrap_or_else(|| profile.firebase_uid.to_string());
+        let photo_url = Some(profile.photo_url.clone()).filter(|url| !url.is_empty());
+
+        Self {
+            display_name,
+            photo_url,
+            uid: Some(profile.firebase_uid.to_string()),
+            is_service_account: false,
+        }
+    }
 }
 
 impl From<&TaskPrincipalInfo> for PrincipalInfo {
@@ -261,7 +281,9 @@ impl ConversationDetailsData {
         // Server metadata (creator, timestamps)
         let mut creator = None;
         if let Some(server_metadata) = conversation.server_metadata() {
-            if let Some(creator_uid_str) = &server_metadata.metadata.creator_uid {
+            if let Some(creator_profile) = &server_metadata.creator {
+                creator = Some(PrincipalInfo::from_user_profile(creator_profile));
+            } else if let Some(creator_uid_str) = &server_metadata.metadata.creator_uid {
                 let creator_uid = UserUid::new(creator_uid_str);
                 let user_profiles = UserProfiles::handle(app).as_ref(app);
 
@@ -602,6 +624,16 @@ pub enum ConversationDetailsPanelAction {
     OpenInOz,
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[derive(Debug)]
+enum DetailsPanelLocalContinuationInfo {
+    Conversation(AIConversationId),
+    ThirdPartyTask {
+        task_id: AmbientAgentTaskId,
+        harness: AIAgentHarness,
+    },
+}
+
 pub fn init(app: &mut AppContext) {
     use warpui::keymap::macros::*;
 
@@ -710,7 +742,10 @@ impl ConversationDetailsPanel {
     }
 
     #[cfg(not(target_family = "wasm"))]
-    fn continue_locally_conversation_id(&self, app: &AppContext) -> Option<AIConversationId> {
+    fn local_continuation_info(
+        &self,
+        app: &AppContext,
+    ) -> Option<DetailsPanelLocalContinuationInfo> {
         if !AISettings::as_ref(app).is_any_ai_enabled(app) {
             return None;
         }
@@ -725,9 +760,12 @@ impl ConversationDetailsPanel {
                 if status.is_in_progress() {
                     return None;
                 }
-                Some(*ai_conversation_id.as_ref()?)
+                Some(DetailsPanelLocalContinuationInfo::Conversation(
+                    *ai_conversation_id.as_ref()?,
+                ))
             }
             PanelMode::Task {
+                task_id,
                 display_status,
                 conversation_id,
                 ..
@@ -736,15 +774,29 @@ impl ConversationDetailsPanel {
                 if status.is_working() {
                     return None;
                 }
-                // Hide for non-Oz harnesses (e.g. Claude, Gemini): they can't be
-                // forked into a local Warp conversation.
-                if matches!(self.data.harness, Some(h) if h != Harness::Oz) {
-                    return None;
-                }
 
-                let server_token = ServerConversationToken::new(conversation_id.as_ref()?.clone());
-                BlocklistAIHistoryModel::as_ref(app)
-                    .find_conversation_id_by_server_token(&server_token)
+                match self.data.harness {
+                    Some(Harness::Claude) => {
+                        Some(DetailsPanelLocalContinuationInfo::ThirdPartyTask {
+                            task_id: *task_id.as_ref()?,
+                            harness: AIAgentHarness::ClaudeCode,
+                        })
+                    }
+                    Some(Harness::Codex) => {
+                        Some(DetailsPanelLocalContinuationInfo::ThirdPartyTask {
+                            task_id: *task_id.as_ref()?,
+                            harness: AIAgentHarness::Codex,
+                        })
+                    }
+                    Some(Harness::Oz) | None => {
+                        let server_token =
+                            ServerConversationToken::new(conversation_id.as_ref()?.clone());
+                        BlocklistAIHistoryModel::as_ref(app)
+                            .find_conversation_id_by_server_token(&server_token)
+                            .map(DetailsPanelLocalContinuationInfo::Conversation)
+                    }
+                    Some(Harness::Gemini | Harness::OpenCode | Harness::Unknown) => None,
+                }
             }
         }
     }
@@ -911,6 +963,7 @@ impl ConversationDetailsPanel {
                     summarize_after_fork: false,
                     summarization_prompt: None,
                     initial_prompt: None,
+                    initial_attachments: vec![],
                     destination: ForkedConversationDestination::NewTab,
                 });
             }
@@ -1761,16 +1814,16 @@ impl View for ConversationDetailsPanel {
         let has_action_buttons = !self.action_buttons.as_ref(app).is_empty();
 
         #[cfg(not(target_family = "wasm"))]
-        let has_continue_locally = self.continue_locally_conversation_id(app).is_some();
+        let has_local_continuation_info = self.local_continuation_info(app).is_some();
         #[cfg(target_family = "wasm")]
-        let has_continue_locally = false;
+        let has_local_continuation_info = false;
         let has_oz_url = Self::oz_run_url(&self.data).is_some();
 
-        if has_continue_locally || has_oz_url {
+        if has_local_continuation_info || has_oz_url {
             let mut buttons_wrap = Wrap::row().with_spacing(8.).with_run_spacing(8.);
 
             #[cfg(not(target_family = "wasm"))]
-            if has_continue_locally {
+            if has_local_continuation_info {
                 buttons_wrap.add_child(ChildView::new(&self.continue_locally_button).finish());
             }
             if has_oz_url {
@@ -2212,14 +2265,26 @@ impl TypedActionView for ConversationDetailsPanel {
             }
             #[cfg(not(target_family = "wasm"))]
             ConversationDetailsPanelAction::ContinueLocally => {
-                if let Some(conversation_id) = self.continue_locally_conversation_id(ctx) {
+                if let Some(continuation_info) = self.local_continuation_info(ctx) {
                     send_telemetry_from_ctx!(
                         AgentManagementTelemetryEvent::DetailsPanelContinueLocally,
                         ctx
                     );
-                    ctx.dispatch_typed_action(&WorkspaceAction::ContinueConversationLocally {
-                        conversation_id,
-                    });
+                    match continuation_info {
+                        DetailsPanelLocalContinuationInfo::Conversation(conversation_id) => {
+                            ctx.dispatch_typed_action(
+                                &WorkspaceAction::ContinueConversationLocally { conversation_id },
+                            );
+                        }
+                        DetailsPanelLocalContinuationInfo::ThirdPartyTask { task_id, harness } => {
+                            ctx.dispatch_typed_action(
+                                &WorkspaceAction::ContinueThirdPartyConversationLocally {
+                                    task_id,
+                                    harness,
+                                },
+                            );
+                        }
+                    }
                 }
             }
             ConversationDetailsPanelAction::OpenInOz => {

@@ -128,6 +128,17 @@ impl TerminalView {
             {
                 return None;
             }
+
+            let is_cloud_conversation_selection = model.is_shared_ambient_agent_session()
+                || model.is_conversation_transcript_viewer()
+                || self
+                    .ambient_agent_view_model
+                    .as_ref()
+                    .is_some_and(|model| model.as_ref(ctx).is_ambient_agent());
+            if !is_cloud_conversation_selection {
+                return None;
+            }
+
             self.ambient_agent_task_id_for_details_panel_from_model(&model, ctx)
         };
         let Some(task_id) = task_id else {
@@ -143,6 +154,29 @@ impl TerminalView {
                 .should_fallback_to_tombstone()
                 .then_some(CloudConversationContinuationUiState::Tombstone { cta: None }),
         }
+    }
+
+    pub(in crate::terminal::view) fn blocks_cloud_followups_for_ambient_agent_session_from_model(
+        &self,
+        model: &TerminalModel,
+        ctx: &AppContext,
+    ) -> bool {
+        if self
+            .ambient_agent_view_model
+            .as_ref()
+            .is_some_and(|model| model.as_ref(ctx).blocks_cloud_followups())
+        {
+            return true;
+        }
+
+        let Some(task_id) = self.ambient_agent_task_id_for_details_panel_from_model(model, ctx)
+        else {
+            return false;
+        };
+
+        AgentConversationsModel::as_ref(ctx)
+            .get_task_data(&task_id)
+            .is_some_and(|task| task.blocks_cloud_followups())
     }
 
     pub(crate) fn owned_ambient_agent_task_id(
@@ -535,7 +569,7 @@ impl TerminalView {
             && scrollback_type == SharedSessionScrollbackType::None
         {
             let has_conversations = BlocklistAIHistoryModel::as_ref(ctx)
-                .all_live_conversations_for_terminal_view(ctx.handle().id())
+                .all_live_conversations_for_terminal_surface(ctx.handle().id())
                 .any(|conv| conv.exchange_count() > 0);
 
             if has_conversations {
@@ -1488,6 +1522,13 @@ impl TerminalView {
                 let role = &role;
                 editor.set_interaction_state(role.into(), ctx);
             });
+            // Role gates whether prompts can be sent, so the queued prompts panel's
+            // send-now buttons and enter hint must re-sync.
+            if let Some(panel) = input.queued_prompts_panel().cloned() {
+                panel.update(ctx, |panel, ctx| {
+                    panel.set_can_send_prompt(role.can_execute(), ctx);
+                });
+            }
         });
     }
 
@@ -1767,15 +1808,13 @@ impl TerminalView {
                     .unpin_rich_content_from_bottom(pending_query_view_id);
             }
         }
-        self.insert_rich_content(
-            None,
-            tombstone_view_handle,
-            None,
-            RichContentInsertionPosition::Append {
+        let insertion_position = self
+            .pending_user_query_view_id
+            .map(RichContentInsertionPosition::AfterRichContent)
+            .unwrap_or(RichContentInsertionPosition::Append {
                 insert_below_long_running_block: true,
-            },
-            ctx,
-        );
+            });
+        self.insert_rich_content(None, tombstone_view_handle, None, insertion_position, ctx);
         self.conversation_ended_tombstone_view_id = Some(tombstone_view_id);
     }
 

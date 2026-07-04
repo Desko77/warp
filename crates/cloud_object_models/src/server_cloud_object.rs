@@ -1,10 +1,10 @@
 use std::any::Any;
 
 use anyhow::Result;
-use cloud_objects::{
-    cloud_object::{GenericServerObject, GenericStringModel, Serializer, ServerMetadata},
-    ids::{GenericStringObjectId, ObjectUid, ServerId, SyncId},
+use cloud_objects::cloud_object::{
+    GenericServerObject, GenericStringModel, Serializer, ServerMetadata,
 };
+use cloud_objects::ids::{GenericStringObjectId, ObjectUid, ServerId, SyncId};
 use warp_graphql::object::CloudObjectWithDescendants;
 
 use crate::{
@@ -318,5 +318,10 @@ fn server_gso_to_cloud_object(
                 GenericServerObject::<GenericStringObjectId, GenericStringModel<ScheduledAmbientAgent, JsonSerializer>>::try_from_gql(gso)?,
             ))
         }
+        // Formats unknown to this client build (e.g. the server-only `JsonRunner`).
+        // Returning an error lets callers skip the object rather than failing.
+        warp_graphql::generic_string_object::GenericStringObjectFormat::Unknown => Err(anyhow::anyhow!(
+            "unsupported generic string object format (unknown to this client build)"
+        )),
     }
 }

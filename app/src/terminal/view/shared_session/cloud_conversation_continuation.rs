@@ -59,6 +59,9 @@ pub(in crate::terminal::view) fn resolve_cloud_conversation_continuation_ui_stat
     let Some(task) = AgentConversationsModel::as_ref(app).get_task_data(&task_id) else {
         return Err(CloudConversationContinuationError::MissingTask);
     };
+    if task.blocks_cloud_followups() {
+        return Ok(CloudConversationContinuationUiState::Tombstone { cta: None });
+    }
     if task.has_active_execution() {
         return Err(CloudConversationContinuationError::ActiveTaskExecution);
     }
@@ -251,11 +254,11 @@ pub(in crate::terminal::view) fn conversation_failed_before_task_creation(
     terminal_view_id: EntityId,
     history_model: &BlocklistAIHistoryModel,
 ) -> bool {
-    if history_model.is_terminal_view_conversation_transcript_viewer(terminal_view_id) {
+    if history_model.is_terminal_surface_conversation_transcript_viewer(terminal_view_id) {
         return false;
     }
     history_model
-        .all_live_conversations_for_terminal_view(terminal_view_id)
+        .all_live_conversations_for_terminal_surface(terminal_view_id)
         .next()
         .and_then(conversation_output_status_from_conversation)
         .is_some_and(|status| matches!(status, AmbientConversationStatus::Error { .. }))
@@ -267,7 +270,7 @@ fn local_conversation_id_for_local_continuation(
     history_model: &BlocklistAIHistoryModel,
 ) -> Option<AIConversationId> {
     history_model
-        .all_live_conversations_for_terminal_view(terminal_view_id)
+        .all_live_conversations_for_terminal_surface(terminal_view_id)
         .find(|conversation| conversation.server_conversation_token() == Some(conversation_token))
         .map(|conversation| conversation.id())
         .or_else(|| history_model.find_conversation_id_by_server_token(conversation_token))
