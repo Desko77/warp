@@ -782,3 +782,179 @@ fn test_hide_multiple_child_agent_panes() {
     assert_eq!(tree.visible_pane_ids(), vec![panes[0], panes[1]]);
     assert!(tree.is_pane_hidden(&panes[2]));
 }
+
+// ---- Grid preset (SplitActiveIntoGrid) tests ----
+//
+// These exercise the tree structure produced by PaneGroup::build_grid_from_active. The real
+// method drives insert_terminal_pane (which creates live sessions and needs a ViewContext);
+// here we replay the SAME algorithm - the real `parent_axis_of_leaf`, the same axis binding
+// (Down = rows, Right = cols) and the same "chain from the last created pane" order - via plain
+// tree splits, which are structurally equivalent. Kept next to the source so the two stay in sync.
+
+/// Visual grid dimensions (rows, cols) of a subtree, independent of nesting / outer axis.
+/// Horizontal branch: columns add up, rows equal across children; Vertical branch: the reverse.
+fn grid_dims(node: &PaneNode) -> (usize, usize) {
+    match node {
+        PaneNode::Leaf(_) => (1, 1),
+        PaneNode::Branch(branch) => {
+            let children: Vec<(usize, usize)> =
+                branch.nodes.iter().map(|(_, n)| grid_dims(n)).collect();
+            match branch.axis() {
+                SplitDirection::Horizontal => (
+                    children[0].0,
+                    children.iter().map(|(_, c)| *c).sum::<usize>(),
+                ),
+                SplitDirection::Vertical => (
+                    children.iter().map(|(r, _)| *r).sum::<usize>(),
+                    children[0].1,
+                ),
+            }
+        }
+    }
+}
+
+/// Build a chain of `count` panes from `start`, each split off the last created pane.
+fn split_chain_on_tree(
+    tree: &mut PaneData,
+    start: PaneId,
+    count: usize,
+    direction: Direction,
+) -> Vec<PaneId> {
+    let mut cells = vec![start];
+    let mut last = start;
+    for _ in 1..count {
+        let new = PaneId::dummy_pane_id();
+        tree.split(last, new, direction);
+        cells.push(new);
+        last = new;
+    }
+    cells
+}
+
+/// Tree-level mirror of PaneGroup::build_grid_from_active (same axis choice and ordering).
+fn build_grid_on_tree(tree: &mut PaneData, anchor: PaneId, rows: usize, cols: usize) {
+    let columns_outer = !matches!(
+        tree.parent_axis_of_leaf(anchor),
+        Some(SplitDirection::Horizontal)
+    );
+    if columns_outer {
+        let columns = split_chain_on_tree(tree, anchor, cols, Direction::Right);
+        for column_top in columns {
+            split_chain_on_tree(tree, column_top, rows, Direction::Down);
+        }
+    } else {
+        let grid_rows = split_chain_on_tree(tree, anchor, rows, Direction::Down);
+        for row_left in grid_rows {
+            split_chain_on_tree(tree, row_left, cols, Direction::Right);
+        }
+    }
+}
+
+#[test]
+fn test_parent_axis_of_leaf() {
+    let panes = [
+        PaneId::dummy_pane_id(),
+        PaneId::dummy_pane_id(),
+        PaneId::dummy_pane_id(),
+    ];
+
+    // Root leaf: no parent branch.
+    let tree = PaneData::new(panes[0]);
+    assert_eq!(tree.parent_axis_of_leaf(panes[0]), None);
+
+    // Horizontal branch [A | X].
+    let mut tree = PaneData::new(panes[0]);
+    tree.split(panes[0], panes[1], Direction::Right);
+    assert_eq!(
+        tree.parent_axis_of_leaf(panes[0]),
+        Some(SplitDirection::Horizontal)
+    );
+    assert_eq!(
+        tree.parent_axis_of_leaf(panes[1]),
+        Some(SplitDirection::Horizontal)
+    );
+
+    // Vertical branch [A / X].
+    let mut tree = PaneData::new(panes[0]);
+    tree.split(panes[0], panes[1], Direction::Down);
+    assert_eq!(
+        tree.parent_axis_of_leaf(panes[0]),
+        Some(SplitDirection::Vertical)
+    );
+
+    // Pane not in the tree.
+    assert_eq!(tree.parent_axis_of_leaf(panes[2]), None);
+}
+
+#[test]
+fn test_grid_geometry_and_count_clean_start() {
+    // From a single root pane, every preset yields exactly R*C leaves in an R x C grid,
+    // and the active pane stays top-left (first in left-to-right / top-to-bottom order).
+    for (rows, cols) in [(2, 2), (2, 3), (3, 2), (3, 3)] {
+        let anchor = PaneId::dummy_pane_id();
+        let mut tree = PaneData::new(anchor);
+        build_grid_on_tree(&mut tree, anchor, rows, cols);
+
+        assert_eq!(tree.pane_ids().len(), rows * cols, "{rows}x{cols}: leaf count");
+        assert_eq!(grid_dims(&tree.root), (rows, cols), "{rows}x{cols}: geometry");
+        assert_eq!(
+            tree.pane_ids()[0],
+            anchor,
+            "{rows}x{cols}: active pane must be top-left"
+        );
+    }
+}
+
+#[test]
+fn test_grid_geometry_survives_forced_outer_axis() {
+    // Isolation makes the outer axis depend on the neighbour's orientation; the R x C geometry
+    // must hold regardless. Guard against the "outer axis = rows" trap, where a 2x3 next to a
+    // vertical neighbour would degenerate into 3x2.
+    for (rows, cols) in [(2, 3), (3, 2)] {
+        for neighbour_dir in [Direction::Right, Direction::Down] {
+            let anchor = PaneId::dummy_pane_id();
+            let neighbour = PaneId::dummy_pane_id();
+            let mut tree = PaneData::new(anchor);
+            tree.split(anchor, neighbour, neighbour_dir);
+
+            build_grid_on_tree(&mut tree, anchor, rows, cols);
+
+            // The grid lives in the anchor's slot: the first child of the root branch.
+            let root_branch = tree.root.as_branch().expect("root should be a branch");
+            let grid_subtree = &root_branch.nodes[0].1;
+            assert_eq!(
+                grid_dims(grid_subtree),
+                (rows, cols),
+                "{rows}x{cols} next to {neighbour_dir:?} neighbour: geometry preserved"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_grid_isolation_leaves_neighbour_intact() {
+    // Building a grid from a pane that has a neighbour must not touch the neighbour: it stays a
+    // direct leaf child of the root, and only the anchor's slot becomes the grid subtree.
+    for neighbour_dir in [Direction::Right, Direction::Down] {
+        let anchor = PaneId::dummy_pane_id();
+        let neighbour = PaneId::dummy_pane_id();
+        let mut tree = PaneData::new(anchor);
+        tree.split(anchor, neighbour, neighbour_dir);
+
+        build_grid_on_tree(&mut tree, anchor, 2, 2);
+
+        assert!(
+            tree.pane_ids().contains(&neighbour),
+            "neighbour ({neighbour_dir:?}) must survive"
+        );
+        assert_eq!(tree.pane_ids().len(), 5, "4 grid cells + 1 untouched neighbour");
+
+        let root_branch = tree.root.as_branch().expect("root should be a branch");
+        assert_eq!(root_branch.nodes.len(), 2, "root must keep exactly 2 children");
+        let neighbour_is_leaf = root_branch
+            .nodes
+            .iter()
+            .any(|(_, n)| matches!(n, PaneNode::Leaf(p) if *p == neighbour));
+        assert!(neighbour_is_leaf, "neighbour must remain a leaf child of root");
+    }
+}

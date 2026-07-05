@@ -289,6 +289,9 @@ pub enum ActivationReason {
 #[derive(Debug, Clone)]
 pub enum PaneGroupAction {
     Add(Direction),
+    /// Split the active pane into an `rows` x `cols` grid, creating the missing panes
+    /// inside the active pane's own slot (neighbours are left untouched).
+    SplitActiveIntoGrid { rows: usize, cols: usize },
     Remove(PaneId),
     RemoveActive,
     Activate(PaneId, ActivationReason),
@@ -377,6 +380,29 @@ pub fn init(app: &mut AppContext) {
         )
         .with_context_predicate(id!("PaneGroup") & !id!("PaneGroup_PaneDragging"))
         .with_custom_action(CustomAction::SplitPaneUp)
+        .with_enabled(|| ContextFlag::CreateNewSession.is_enabled()),
+        // Split the active pane into a preset grid. No default keystroke - assignable in
+        // Settings -> Keyboard, and shown in the command palette.
+        EditableBinding::new(
+            "pane_group:split_into_grid_2x2",
+            "Split pane into 2x2 grid",
+            PaneGroupAction::SplitActiveIntoGrid { rows: 2, cols: 2 },
+        )
+        .with_context_predicate(id!("PaneGroup") & !id!("PaneGroup_PaneDragging"))
+        .with_enabled(|| ContextFlag::CreateNewSession.is_enabled()),
+        EditableBinding::new(
+            "pane_group:split_into_grid_2x3",
+            "Split pane into 2x3 grid (2 rows, 3 columns)",
+            PaneGroupAction::SplitActiveIntoGrid { rows: 2, cols: 3 },
+        )
+        .with_context_predicate(id!("PaneGroup") & !id!("PaneGroup_PaneDragging"))
+        .with_enabled(|| ContextFlag::CreateNewSession.is_enabled()),
+        EditableBinding::new(
+            "pane_group:split_into_grid_3x3",
+            "Split pane into 3x3 grid",
+            PaneGroupAction::SplitActiveIntoGrid { rows: 3, cols: 3 },
+        )
+        .with_context_predicate(id!("PaneGroup") & !id!("PaneGroup_PaneDragging"))
         .with_enabled(|| ContextFlag::CreateNewSession.is_enabled()),
         EditableBinding::new(
             "pane_group:navigate_left",
@@ -3891,6 +3917,87 @@ impl PaneGroup {
         );
         ctx.emit(Event::AppStateChanged);
         new_pane_id
+    }
+
+    /// Builds a chain of `count` panes starting from `start`, each split off the *last created*
+    /// pane (not off `start`), and returns all pane ids in order including `start`.
+    ///
+    /// Splitting from the last created pane preserves natural order. Anchoring every split on
+    /// `start` would reverse the order, because `PaneBranch::split` inserts a same-axis sibling
+    /// at `idx + 1` (tree.rs), so repeated inserts at `start`'s slot push earlier panes rightward.
+    fn split_chain(
+        &mut self,
+        start: PaneId,
+        count: usize,
+        direction: Direction,
+        chosen_shell: &Option<AvailableShell>,
+        ctx: &mut ViewContext<Self>,
+    ) -> Vec<PaneId> {
+        let mut cells = vec![start];
+        let mut last = start;
+        for _ in 1..count {
+            last = self
+                .insert_terminal_pane(direction, last, chosen_shell.clone(), ctx)
+                .into();
+            cells.push(last);
+        }
+        cells
+    }
+
+    /// Splits the active pane into a `rows` x `cols` grid, creating the missing panes inside the
+    /// active pane's own slot. The active pane keeps its live session and becomes the top-left
+    /// cell; neighbouring panes in the tab are not affected.
+    ///
+    /// Isolation: the first split is made perpendicular to the axis of the active pane's parent
+    /// branch, so the active leaf is wrapped into a sub-branch *in its own slot* (the
+    /// "axes don't match" case in `PaneBranch::split`) instead of being appended as a sibling into
+    /// the parent branch (which would squeeze the neighbours).
+    ///
+    /// Counter-to-axis binding is fixed: `rows` divisions always run along the vertical axis
+    /// (`Direction::Down`), `cols` along the horizontal axis (`Direction::Right`), regardless of
+    /// which axis ends up outer. So a 2x3 preset is always visually 2 rows x 3 columns whatever
+    /// the parent axis was. `Down`/`Right` (never `Up`/`Left`) keep the active pane top-left.
+    fn build_grid_from_active(&mut self, rows: usize, cols: usize, ctx: &mut ViewContext<Self>) {
+        // Presets are always at least 2x2. A 1xN / Nx1 "grid" degenerates: its single split
+        // axis may coincide with the parent axis, and then the first split cannot isolate the
+        // active pane in its own slot (there is no "wrap a leaf in a 1-element branch" primitive
+        // in the tree). Treat anything smaller than 2x2 as a no-op, and assert in debug so a
+        // future degenerate caller is caught rather than silently breaking isolation.
+        debug_assert!(rows >= 2 && cols >= 2, "grid presets must be at least 2x2");
+        if rows < 2 || cols < 2 {
+            return;
+        }
+
+        let anchor = self.focused_pane_id(ctx);
+        let chosen_shell = {
+            if let Some(model) = self.active_session_terminal_model(ctx) {
+                let model = model.lock();
+                model.shell_launch_state().available_shell()
+            } else {
+                None
+            }
+        };
+
+        // Outer axis is perpendicular to the parent branch axis, so the grid stays inside the
+        // active pane's slot. Parent Horizontal -> rows outer (first split Down); parent Vertical
+        // or root-leaf (None) -> columns outer (first split Right). Either way Down carries `rows`
+        // and Right carries `cols`, so the visual R x C geometry is preserved.
+        let columns_outer = !matches!(
+            self.panes.parent_axis_of_leaf(anchor),
+            Some(SplitDirection::Horizontal)
+        );
+
+        if columns_outer {
+            let columns = self.split_chain(anchor, cols, Direction::Right, &chosen_shell, ctx);
+            for column_top in columns {
+                self.split_chain(column_top, rows, Direction::Down, &chosen_shell, ctx);
+            }
+        } else {
+            let grid_rows = self.split_chain(anchor, rows, Direction::Down, &chosen_shell, ctx);
+            for row_left in grid_rows {
+                self.split_chain(row_left, cols, Direction::Right, &chosen_shell, ctx);
+            }
+        }
     }
 
     /// Creates a terminal pane that lives off-tree as a child agent pane.
@@ -7880,6 +7987,7 @@ impl TypedActionView for PaneGroup {
                 };
                 self.add_terminal_pane(*direction, chosen_shell, ctx);
             }
+            SplitActiveIntoGrid { rows, cols } => self.build_grid_from_active(*rows, *cols, ctx),
             Remove(view_id) => self.close_pane_with_confirmation(*view_id, ctx),
             RemoveActive => self.close_active_pane_with_confirmation(ctx),
             Activate(view_id, reason) => self.focus_pane_on_mouse_event(*view_id, *reason, ctx),

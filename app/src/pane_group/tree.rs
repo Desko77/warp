@@ -504,6 +504,14 @@ impl PaneData {
         self.root.contains_pane(pane_id)
     }
 
+    /// Returns the axis of the branch that directly contains `pane_id` as a leaf child.
+    /// `None` if `pane_id` is the root leaf (no neighbours - grid isolation not needed).
+    /// Used to pick a first split perpendicular to the parent axis so a grid built from
+    /// `pane_id` stays inside its own slot instead of expanding the parent branch.
+    pub(crate) fn parent_axis_of_leaf(&self, pane_id: PaneId) -> Option<SplitDirection> {
+        self.root.parent_axis_of_leaf(pane_id)
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -673,6 +681,29 @@ impl PaneNode {
                 }
             }
             PaneNode::Branch(branch) => branch.split(old_pane_id, new_pane_id, direction),
+        }
+    }
+
+    /// Returns the axis of the branch that *directly* contains `pane_id` as a leaf child.
+    /// `None` if `pane_id` is not present, or is the root leaf with no parent branch.
+    fn parent_axis_of_leaf(&self, pane_id: PaneId) -> Option<SplitDirection> {
+        match self {
+            PaneNode::Leaf(_) => None,
+            PaneNode::Branch(branch) => {
+                // Is `pane_id` a direct leaf child of this branch? If so, its parent axis is ours.
+                let is_direct_child = branch
+                    .nodes
+                    .iter()
+                    .any(|(_, node)| matches!(node, PaneNode::Leaf(p) if *p == pane_id));
+                if is_direct_child {
+                    return Some(branch.axis);
+                }
+                // Otherwise recurse into child branches.
+                branch
+                    .nodes
+                    .iter()
+                    .find_map(|(_, node)| node.parent_axis_of_leaf(pane_id))
+            }
         }
     }
 
