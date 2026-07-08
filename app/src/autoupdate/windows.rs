@@ -317,7 +317,9 @@ fn app_name_prefix(channel: Channel) -> &'static str {
         Channel::Local => "warp",
         Channel::Integration => "integration",
         Channel::Dev => "WarpDev",
-        Channel::Oss => "warp-oss",
+        // Must match the installer name produced by script/windows/bundle.ps1
+        // for the oss channel (WarpOssSetup.exe).
+        Channel::Oss => "WarpOss",
     }
 }
 

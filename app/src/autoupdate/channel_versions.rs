@@ -26,6 +26,13 @@ pub async fn fetch_channel_versions(
             .context("Failed to parse channel versions JSON");
     }
 
+    // Fork-specific: the Oss channel fetches the manifest from this fork's
+    // GitHub Releases (releases_base_url), not Warp's servers - otherwise it
+    // would see the official Warp versions.
+    if matches!(ChannelState::channel(), Channel::Oss) {
+        return fetch_channel_versions_from_json_storage(server_api.http_client(), nonce).await;
+    }
+
     let channel_versions = server_api
         .fetch_channel_versions(include_changelogs, is_daily)
         .await
@@ -59,11 +66,16 @@ async fn fetch_channel_versions_from_json_storage(
     log::info!("Fetching channel versions from GCP JSON storage");
     let res = client
         .get(
-            format!(
-                "{}/channel_versions.json?r={}",
-                ChannelState::releases_base_url(),
-                nonce
-            )
+            {
+                let base = ChannelState::releases_base_url();
+                // Fork-specific: GitHub serves the latest release's assets at
+                // {base}/latest/download/{asset}.
+                if matches!(ChannelState::channel(), Channel::Oss) {
+                    format!("{base}/latest/download/channel_versions.json?r={nonce}")
+                } else {
+                    format!("{base}/channel_versions.json?r={nonce}")
+                }
+            }
             .as_str(),
         )
         .timeout(FETCH_CHANNEL_VERSIONS_TIMEOUT)

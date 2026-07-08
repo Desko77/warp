@@ -112,7 +112,8 @@ if ("$CHANNEL" -eq 'local') {
     $APP_NAME = 'WarpOss'
     # The OSS channel does not ship Sentry, so drop the crash_reporting feature
     # (which would otherwise pull in the Sentry SDK as a dependency).
-    $FEATURES = 'release_bundle,gui'
+    # Fork-specific: enable `autoupdate` so warp-oss can self-update from the fork's releases.
+    $FEATURES = 'release_bundle,gui,autoupdate'
 }
 
 # All channels ship the v3 classifier and v2 heuristic.
