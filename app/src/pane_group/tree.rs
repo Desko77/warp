@@ -520,6 +520,16 @@ impl PaneData {
         self.len == 0
     }
 
+    /// The pane id when the tree is exactly a single root leaf, otherwise `None`.
+    /// Note: a single root leaf can still be hidden (e.g. a job pane), so callers that
+    /// need a visible sole pane must also check [`PaneData::num_hidden_panes`].
+    pub fn sole_leaf_id(&self) -> Option<PaneId> {
+        match self.root {
+            PaneNode::Leaf(id) => Some(id),
+            PaneNode::Branch(_) => None,
+        }
+    }
+
     pub fn render(&self, theme: &WarpTheme, app: &AppContext) -> Box<dyn Element> {
         match &self.root {
             PaneNode::Leaf(pane) => pane.render(app),

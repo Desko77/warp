@@ -138,6 +138,31 @@ impl SyncedInputState {
         }
     }
 
+    /// Drops any synced pane-group ids that are no longer live and re-normalizes.
+    ///
+    /// `remove_tab` never touches this state, so a closed tab's id lingers in an
+    /// `AllPanesInPaneGroups` set and inflates the count used to collapse into `All`.
+    /// Callers that change which tabs exist (e.g. merging one tab into another) pass the
+    /// ids of the still-live pane groups so the stored set is retained down to them and
+    /// re-normalized against the fresh count. `None` (nothing synced) and `All` (symbolic
+    /// over whatever tabs currently exist) carry no stale ids and are left untouched.
+    pub fn prune_and_renormalize(
+        &mut self,
+        window_id: WindowId,
+        live_pane_group_ids: impl Iterator<Item = EntityId>,
+    ) {
+        let new_state = match self.sync_state_by_window.get(&window_id).unwrap_or(&None) {
+            Some(SyncedPanes::AllPanesInPaneGroups { pane_group_ids }) => {
+                let live: HashSet<EntityId> = live_pane_group_ids.collect();
+                let pruned: HashSet<EntityId> =
+                    pane_group_ids.intersection(&live).copied().collect();
+                Self::normalized_synced_panes(pruned, live.len())
+            }
+            _ => return,
+        };
+        self.sync_state_by_window.insert(window_id, new_state);
+    }
+
     pub fn disable_sync_terminal_inputs(&mut self, window_id: WindowId) {
         self.sync_state_by_window.insert(window_id, None);
     }

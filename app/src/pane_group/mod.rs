@@ -291,7 +291,10 @@ pub enum PaneGroupAction {
     Add(Direction),
     /// Split the active pane into an `rows` x `cols` grid, creating the missing panes
     /// inside the active pane's own slot (neighbours are left untouched).
-    SplitActiveIntoGrid { rows: usize, cols: usize },
+    SplitActiveIntoGrid {
+        rows: usize,
+        cols: usize,
+    },
     Remove(PaneId),
     RemoveActive,
     Activate(PaneId, ActivationReason),
@@ -4406,7 +4409,11 @@ impl PaneGroup {
             None => log::error!("Could not find data for pane id: {pane_id:?}"),
         };
 
-        if !self.panes.remove(*pane_id) {
+        // When this is the last pane the tree is a single root leaf, which `remove`
+        // intentionally cannot detach (a leaf is only removable from a parent branch).
+        // The tab is torn down whole via the `Exited` event emitted above, so skip the
+        // no-op removal and its misleading "Pane not found" error.
+        if self.panes.len() > 1 && !self.panes.remove(*pane_id) {
             log::error!("Pane not found");
         }
 
@@ -6596,6 +6603,62 @@ impl PaneGroup {
             focus_new_pane,
             ctx,
         );
+    }
+
+    /// The pane id of this group when it holds exactly one visible pane and nothing else.
+    ///
+    /// Returns `Some` only when the tree is a single root leaf, there are no hidden panes
+    /// (a lone leaf can itself be hidden, e.g. a job/move pane), and `pane_contents` holds
+    /// exactly that one pane. Used to gate merging a whole tab into a neighbour: such a
+    /// pane can be moved out wholesale, and anything richer (splits, hidden/off-tree panes)
+    /// is intentionally rejected.
+    pub fn sole_tree_pane_id(&self) -> Option<PaneId> {
+        if self.panes.num_hidden_panes() != 0 {
+            return None;
+        }
+        let tree_id = self.panes.sole_leaf_id()?;
+        (self.pane_contents.len() == 1 && self.pane_contents.contains_key(&tree_id))
+            .then_some(tree_id)
+    }
+
+    /// Inserts an already-live pane at the root of this group's tree in `direction`.
+    ///
+    /// Unlike [`PaneGroup::add_pane_with_direction`] this takes a boxed `AnyPaneContent`
+    /// (a pane extracted from another group via [`PaneGroup::remove_pane_for_move`]) and
+    /// deliberately routes through `add_pane_with_options` rather than `add_pane` so it does
+    /// not emit split telemetry: the pane is being *moved*, not created, mirroring the
+    /// existing tab-bar drag path (`add_pane_as_hidden`).
+    ///
+    /// `base_pane_id` is `None`, so the insert is a root split that `split_root` performs
+    /// unconditionally; combined with a terminal pane (whose `pre_attach` is always true)
+    /// `add_pane_with_options` cannot fail here, so no rollback of the moved pane is needed.
+    pub fn add_moved_pane_with_direction(
+        &mut self,
+        direction: Direction,
+        pane: Box<dyn AnyPaneContent>,
+        focus_new_pane: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // Rearranging invalidates any in-flight move/undo hidden-pane bookkeeping.
+        self.panes.clear_hidden_panes_from_move();
+        self.clear_hidden_closed_panes(ctx);
+
+        if self
+            .add_pane_with_options(
+                pane,
+                AddPaneOptions {
+                    direction,
+                    base_pane_id: None,
+                    focus_new_pane,
+                    visibility: NewPaneVisibility::Visible,
+                    emit_app_state_changed: true,
+                },
+                ctx,
+            )
+            .is_none()
+        {
+            log::error!("add_moved_pane_with_direction: failed to attach moved pane");
+        }
     }
 
     fn init_pane(

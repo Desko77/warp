@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::workspace::util::TabMovement;
 use ai::index::full_source_code_embedding::manager::CodebaseIndexManager;
 use ai::project_context::model::ProjectContextModel;
 use pane_group::{NotebookPane, PaneState, SplitPaneState, TerminalPaneId};
@@ -2124,8 +2125,17 @@ fn test_tab_context_menu_share_session_items() {
         // When there's a single shared session in a tab (focused), the options
         // for sharing are "Stop sharing" and "Stop sharing all".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                None,
+                None,
+                ctx,
+            );
             assert!(items[0]
                 .is_approximately_same_item_as(&MenuItemFields::new("Stop sharing").into_item()));
             assert!(items[1].is_approximately_same_item_as(
@@ -2146,8 +2156,17 @@ fn test_tab_context_menu_share_session_items() {
         // When there's a single shared session in a tab (unfocused), the options
         // for sharing are "Share session" and "Stop sharing all".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                None,
+                None,
+                ctx,
+            );
             assert!(items[0]
                 .is_approximately_same_item_as(&MenuItemFields::new("Share session").into_item()));
             assert!(items[1].is_approximately_same_item_as(
@@ -2163,8 +2182,17 @@ fn test_tab_context_menu_share_session_items() {
 
         // When there's no shared sessions in a tab, the only option is "Share session".
         workspace.read(&app, |workspace, ctx| {
-            let items =
-                workspace.tabs[1].menu_items(1, 3, &workspace.tab_groups, false, true, true, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                None,
+                None,
+                ctx,
+            );
             assert!(items[0]
                 .is_approximately_same_item_as(&MenuItemFields::new("Share session").into_item()));
             assert!(items[1].is_approximately_same_item_as(&MenuItem::Separator));
@@ -4252,6 +4280,521 @@ fn test_pin_tab_on_grouped_tab_extracts_then_pins() {
             assert_eq!(workspace.tabs[2].pane_group.id(), id2);
             assert!(workspace.tabs[2].group_id.is_none());
             assert!(!workspace.tabs[2].pinned);
+        });
+    });
+}
+
+// --- Tab merge: moving one tab's live pane into an adjacent tab ---
+
+#[test]
+fn test_merge_tab_into_previous_moves_live_pane_and_closes_source() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (source_id, target_id, moved_pane_id) = workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            let target_id = workspace.tabs[0].pane_group.id();
+            let source_id = workspace.tabs[1].pane_group.id();
+            let moved_pane_id = workspace.tabs[1]
+                .pane_group
+                .as_ref(ctx)
+                .sole_tree_pane_id()
+                .expect("single-pane source");
+            (source_id, target_id, moved_pane_id)
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: source_id,
+                    target_pane_group_id: target_id,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+
+        // Fresh block: the deferred `Exited` that closes the emptied source has now flushed.
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.tabs.len(), 1, "source tab closed");
+            let target = workspace.active_tab_pane_group();
+            assert_eq!(target.id(), target_id, "target is active");
+            let target_ref = target.as_ref(ctx);
+            assert_eq!(target_ref.pane_count(), 2, "moved pane split into target");
+            assert!(
+                target_ref.pane_ids().any(|id| id == moved_pane_id),
+                "moved session kept its id (not recreated)"
+            );
+            assert_eq!(
+                target_ref.focused_pane_id(ctx),
+                moved_pane_id,
+                "moved pane is focused"
+            );
+            assert!(
+                !workspace.tab_mru_order().contains(&source_id),
+                "source purged from MRU order"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_merge_active_tab_into_next_via_palette_split_down() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (target_id, moved_pane_id) = workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            // Activate tab 0 so its "next" neighbour is tab 1.
+            workspace.handle_action(&WorkspaceAction::ActivateTab(0), ctx);
+            let target_id = workspace.tabs[1].pane_group.id();
+            let moved_pane_id = workspace.tabs[0]
+                .pane_group
+                .as_ref(ctx)
+                .sole_tree_pane_id()
+                .unwrap();
+            (target_id, moved_pane_id)
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeActiveTabIntoAdjacent {
+                    toward: TabMovement::Right,
+                    direction: Direction::Down,
+                },
+                ctx,
+            );
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            assert_eq!(workspace.tabs.len(), 1);
+            let target = workspace.active_tab_pane_group();
+            assert_eq!(target.id(), target_id, "next tab became the merge target");
+            let target_ref = target.as_ref(ctx);
+            assert_eq!(target_ref.pane_count(), 2);
+            assert!(target_ref.pane_ids().any(|id| id == moved_pane_id));
+        });
+    });
+}
+
+#[test]
+fn test_merge_multi_pane_source_is_noop() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (source_id, target_id) = workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            // Split the (active) source tab so it holds two panes.
+            workspace
+                .active_tab_pane_group()
+                .update(ctx, |pane_group, ctx| {
+                    pane_group.add_terminal_pane(Direction::Right, None, ctx);
+                });
+            let target_id = workspace.tabs[0].pane_group.id();
+            let source_id = workspace.tabs[1].pane_group.id();
+            (source_id, target_id)
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: source_id,
+                    target_pane_group_id: target_id,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+
+        workspace.update(&mut app, |workspace, _ctx| {
+            assert_eq!(
+                workspace.tabs.len(),
+                2,
+                "a multi-pane source is not mergeable"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_merge_active_without_neighbour_in_direction_is_noop() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx); // active becomes the last tab
+
+            // Last tab has no "next" neighbour: must be a silent no-op, not an OOB panic.
+            workspace.handle_action(
+                &WorkspaceAction::MergeActiveTabIntoAdjacent {
+                    toward: TabMovement::Right,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+
+        workspace.update(&mut app, |workspace, _ctx| {
+            assert_eq!(workspace.tabs.len(), 2, "no next neighbour, nothing merged");
+        });
+    });
+}
+
+#[test]
+fn test_merge_guards_non_adjacent_and_stale_source() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (id0, id1, id2) = workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            (
+                workspace.tabs[0].pane_group.id(),
+                workspace.tabs[1].pane_group.id(),
+                workspace.tabs[2].pane_group.id(),
+            )
+        });
+
+        // Non-adjacent (0 and 2) is a no-op.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: id0,
+                    target_pane_group_id: id2,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+        workspace.update(&mut app, |workspace, _ctx| {
+            assert_eq!(workspace.tabs.len(), 3, "non-adjacent merge is a no-op");
+        });
+
+        // A valid merge (1 into 0) closes the source.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: id1,
+                    target_pane_group_id: id0,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+        workspace.update(&mut app, |workspace, _ctx| {
+            assert_eq!(workspace.tabs.len(), 2, "valid merge closed the source");
+        });
+
+        // Re-dispatching the now-stale action (id1 is gone) resolves to a no-op, not a panic.
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: id1,
+                    target_pane_group_id: id0,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+        workspace.update(&mut app, |workspace, _ctx| {
+            assert_eq!(workspace.tabs.len(), 2, "a missing source id is a no-op");
+            let _ = id2;
+        });
+    });
+}
+
+#[test]
+fn test_merge_target_ids_map_correct_neighbours() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            let id0 = workspace.tabs[0].pane_group.id();
+            let id1 = workspace.tabs[1].pane_group.id();
+            let id2 = workspace.tabs[2].pane_group.id();
+
+            // Middle tab targets both neighbours; previous is left, next is right (not swapped).
+            assert_eq!(workspace.merge_target_ids(1, ctx), (Some(id0), Some(id2)));
+            // Edges have a neighbour on one side only.
+            assert_eq!(workspace.merge_target_ids(0, ctx), (None, Some(id1)));
+            assert_eq!(workspace.merge_target_ids(2, ctx), (Some(id1), None));
+
+            // A multi-pane tab is not a mergeable source: no targets at all.
+            workspace.tabs[1].pane_group.update(ctx, |pane_group, ctx| {
+                pane_group.add_terminal_pane(Direction::Right, None, ctx);
+            });
+            assert_eq!(workspace.merge_target_ids(1, ctx), (None, None));
+        });
+    });
+}
+
+#[test]
+fn test_tab_context_menu_merge_items_visibility() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+        });
+
+        workspace.read(&app, |workspace, ctx| {
+            let (previous, next) = workspace.merge_target_ids(1, ctx);
+            let items = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                previous,
+                next,
+                ctx,
+            );
+            let has = |label: &str| {
+                items.iter().any(|item| {
+                    item.is_approximately_same_item_as(&MenuItemFields::new(label).into_item())
+                })
+            };
+            assert!(has("Merge Into Next Tab (Split Right)"));
+            assert!(has("Merge Into Next Tab (Split Down)"));
+            assert!(has("Merge Into Previous Tab (Split Right)"));
+            assert!(has("Merge Into Previous Tab (Split Down)"));
+
+            // With no eligible neighbours the merge section is omitted entirely.
+            let bare = workspace.tabs[1].menu_items(
+                1,
+                3,
+                &workspace.tab_groups,
+                false,
+                true,
+                true,
+                None,
+                None,
+                ctx,
+            );
+            assert!(!bare.iter().any(|item| {
+                item.is_approximately_same_item_as(
+                    &MenuItemFields::new("Merge Into Next Tab (Split Right)").into_item(),
+                )
+            }));
+        });
+    });
+}
+
+#[test]
+fn test_merge_sole_group_member_prunes_group() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (source_id, target_id, group_id) = workspace.update(&mut app, |workspace, ctx| {
+            // mock has tab 0 (ungrouped). Add a new tab in a new group -> the sole member.
+            workspace.handle_action(
+                &WorkspaceAction::SelectNewSessionMenuItem(NewSessionMenuItem::CreateNewTabGroup),
+                ctx,
+            );
+            let source_index = workspace.active_tab_index();
+            let group_id = workspace.tabs[source_index]
+                .group_id
+                .expect("new group tab is grouped");
+            // Pick the adjacent tab as target regardless of where the group tab landed.
+            let target_index = if source_index > 0 {
+                source_index - 1
+            } else {
+                source_index + 1
+            };
+            let source_id = workspace.tabs[source_index].pane_group.id();
+            let target_id = workspace.tabs[target_index].pane_group.id();
+            (source_id, target_id, group_id)
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: source_id,
+                    target_pane_group_id: target_id,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+
+        workspace.update(&mut app, |workspace, _ctx| {
+            assert_eq!(workspace.tabs.len(), 1, "sole group member merged away");
+            assert!(
+                !workspace.tab_groups.contains_key(&group_id),
+                "emptied group is pruned"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_merge_within_collapsed_group_uses_raw_index_and_expands() {
+    let _grouped_tabs_guard = FeatureFlag::GroupedTabs.override_enabled(true);
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (source_id, target_id, group_id, moved_pane_id) =
+            workspace.update(&mut app, |workspace, ctx| {
+                workspace.handle_action(
+                    &WorkspaceAction::SelectNewSessionMenuItem(
+                        NewSessionMenuItem::CreateNewTabGroup,
+                    ),
+                    ctx,
+                );
+                let group_id = workspace.tabs[workspace.active_tab_index()]
+                    .group_id
+                    .expect("grouped");
+                // A second terminal tab inherits the active group, giving it two members.
+                workspace.add_terminal_tab(false, ctx);
+                let members: Vec<usize> = (0..workspace.tabs.len())
+                    .filter(|&i| workspace.tabs[i].group_id == Some(group_id))
+                    .collect();
+                assert_eq!(members.len(), 2, "group has two contiguous members");
+                let target_id = workspace.tabs[members[0]].pane_group.id();
+                let source_id = workspace.tabs[members[1]].pane_group.id();
+                let moved_pane_id = workspace.tabs[members[1]]
+                    .pane_group
+                    .as_ref(ctx)
+                    .sole_tree_pane_id()
+                    .unwrap();
+                workspace.handle_action(&WorkspaceAction::ToggleTabGroupCollapsed(group_id), ctx);
+                assert!(workspace.tab_groups[&group_id].collapsed);
+                (source_id, target_id, group_id, moved_pane_id)
+            });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: source_id,
+                    target_pane_group_id: target_id,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let target = workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.pane_group.id() == target_id)
+                .expect("target still alive");
+            let target_ref = target.pane_group.as_ref(ctx);
+            assert_eq!(target_ref.pane_count(), 2, "merged by raw index within the group");
+            assert!(target_ref.pane_ids().any(|id| id == moved_pane_id));
+            // Activating a hidden collapsed-group member must reveal it (edge 5 / visibility).
+            assert!(
+                !workspace.tab_groups[&group_id].collapsed,
+                "target's group expanded on activation"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_merge_prunes_synced_input_state() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (source_id, target_id, third_id) = workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            workspace.add_terminal_tab(false, ctx);
+            // Selectively sync the target (0) and the source (1), leaving tab 2 unsynced.
+            workspace.handle_action(&WorkspaceAction::ActivateTab(0), ctx);
+            workspace.handle_action(&WorkspaceAction::ToggleSyncTerminalInputsInTab, ctx);
+            workspace.handle_action(&WorkspaceAction::ActivateTab(1), ctx);
+            workspace.handle_action(&WorkspaceAction::ToggleSyncTerminalInputsInTab, ctx);
+            (
+                workspace.tabs[1].pane_group.id(),
+                workspace.tabs[0].pane_group.id(),
+                workspace.tabs[2].pane_group.id(),
+            )
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: source_id,
+                    target_pane_group_id: target_id,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            let window_id = ctx.window_id();
+            let sync = crate::workspace::sync_inputs::SyncedInputState::as_ref(ctx);
+            assert!(
+                sync.should_sync_this_pane_group(target_id, window_id),
+                "target stays synced after the merge"
+            );
+            assert!(
+                !sync.should_sync_this_pane_group(third_id, window_id),
+                "the stale source id does not collapse the set into All"
+            );
+            assert!(
+                !sync.is_syncing_all_inputs(window_id),
+                "no false All from a lingering source id"
+            );
+            let _ = workspace;
+        });
+    });
+}
+
+#[test]
+fn test_merge_child_agent_source_is_gated() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let workspace = mock_workspace(&mut app);
+
+        let (source_id, target_id) = workspace.update(&mut app, |workspace, ctx| {
+            workspace.add_terminal_tab(false, ctx);
+            let target_id = workspace.tabs[0].pane_group.id();
+            let source_id = workspace.tabs[1].pane_group.id();
+            // Mark the source tab as a split-off child-agent host, whose lifecycle is tied to
+            // metadata on its own group and so must not be merged away wholesale.
+            let origin = crate::pane_group::ChildAgentOrigin {
+                source_pane_group: workspace.tabs[0].pane_group.downgrade(),
+                conversation_id: crate::ai::agent::conversation::AIConversationId::new(),
+            };
+            workspace.tabs[1].pane_group.update(ctx, |pane_group, _ctx| {
+                pane_group.set_child_agent_origin(origin);
+            });
+            (source_id, target_id)
+        });
+
+        workspace.update(&mut app, |workspace, ctx| {
+            // Not offered as a merge source...
+            assert_eq!(workspace.merge_target_ids(1, ctx), (None, None));
+            // ...and a direct dispatch is a no-op.
+            workspace.handle_action(
+                &WorkspaceAction::MergeTabIntoAdjacent {
+                    source_pane_group_id: source_id,
+                    target_pane_group_id: target_id,
+                    direction: Direction::Right,
+                },
+                ctx,
+            );
+        });
+
+        workspace.update(&mut app, |workspace, _ctx| {
+            assert_eq!(workspace.tabs.len(), 2, "a child-agent source is not merged");
         });
     });
 }

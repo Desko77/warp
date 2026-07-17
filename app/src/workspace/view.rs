@@ -7631,6 +7631,8 @@ impl Workspace {
 
         let can_move_left = self.can_move_tab(tab_index, TabMovement::Left);
         let can_move_right = self.can_move_tab(tab_index, TabMovement::Right);
+        let (previous_merge_target_id, next_merge_target_id) =
+            self.merge_target_ids(tab_index, ctx);
         let is_only_member_of_group = self.tab_is_only_member_of_its_group(tab_index);
         let menu_items = {
             let tab = &self.tabs[tab_index];
@@ -7641,6 +7643,8 @@ impl Workspace {
                 is_only_member_of_group,
                 can_move_left,
                 can_move_right,
+                previous_merge_target_id,
+                next_merge_target_id,
                 ctx,
             )
         };
@@ -7718,6 +7722,8 @@ impl Workspace {
         };
         let can_move_left = self.can_move_tab(tab_index, TabMovement::Left);
         let can_move_right = self.can_move_tab(tab_index, TabMovement::Right);
+        let (previous_merge_target_id, next_merge_target_id) =
+            self.merge_target_ids(tab_index, ctx);
         let is_only_member_of_group = self.tab_is_only_member_of_its_group(tab_index);
         let tab = &self.tabs[tab_index];
         let menu_items = tab.menu_items_with_pane_name_target(
@@ -7727,6 +7733,8 @@ impl Workspace {
             is_only_member_of_group,
             can_move_left,
             can_move_right,
+            previous_merge_target_id,
+            next_merge_target_id,
             Some(pane_name_target),
             ctx,
         );
@@ -13848,6 +13856,113 @@ impl Workspace {
     /// split a group or cross the pinned/unpinned boundary. Used by the
     /// action handler to no-op blocked moves and by `modify_tab_menu_items`
     /// to hide the entry.
+    /// Whether the tab at `index` may be merged into a neighbour: it must hold exactly one
+    /// visible terminal pane (no splits, hidden, or off-tree panes) and must not be a
+    /// split-off child-agent tab, whose lifecycle is tied to metadata on its own group.
+    /// Adjacency and the target's existence are the caller's responsibility, not this check.
+    pub(super) fn can_merge_source(&self, index: usize, ctx: &AppContext) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        let pane_group = tab.pane_group.as_ref(ctx);
+        let Some(pane_id) = pane_group.sole_tree_pane_id() else {
+            return false;
+        };
+        pane_id.as_terminal_pane_id().is_some() && pane_group.child_agent_origin().is_none()
+    }
+
+    /// The `(previous, next)` neighbour pane-group ids the tab at `index` may be merged into,
+    /// for building its context-menu entries. Both are `None` when the tab itself is not a
+    /// mergeable source; otherwise each side is `Some` only when a neighbour exists there.
+    pub(super) fn merge_target_ids(
+        &self,
+        index: usize,
+        ctx: &AppContext,
+    ) -> (Option<EntityId>, Option<EntityId>) {
+        if !self.can_merge_source(index, ctx) {
+            return (None, None);
+        }
+        let previous = (index > 0).then(|| self.tabs[index - 1].pane_group.id());
+        let next = (index + 1 < self.tabs.len()).then(|| self.tabs[index + 1].pane_group.id());
+        (previous, next)
+    }
+
+    /// Moves the single live terminal pane of the source tab into the target tab, splitting it
+    /// in `direction`, then lets the emptied source tab close itself. Both tabs are addressed
+    /// by stable pane-group id so a tab that closes or reorders while a context menu is open
+    /// cannot retarget the wrong session; the operation is a no-op if either id is gone, the
+    /// tabs are no longer adjacent, or the source is no longer mergeable.
+    fn merge_tab_into_adjacent(
+        &mut self,
+        source_pane_group_id: EntityId,
+        target_pane_group_id: EntityId,
+        direction: Direction,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let index_of = |workspace: &Self, id: EntityId| {
+            workspace
+                .tabs
+                .iter()
+                .position(|tab| tab.pane_group.id() == id)
+        };
+
+        let (Some(source_index), Some(target_index)) = (
+            index_of(self, source_pane_group_id),
+            index_of(self, target_pane_group_id),
+        ) else {
+            return;
+        };
+        if source_index.abs_diff(target_index) != 1 || !self.can_merge_source(source_index, ctx) {
+            return;
+        }
+
+        let source_pane_group = self.tabs[source_index].pane_group.clone();
+        let target_pane_group = self.tabs[target_index].pane_group.clone();
+
+        let Some(pane_id) = source_pane_group.as_ref(ctx).sole_tree_pane_id() else {
+            return;
+        };
+
+        // Extract the live pane (session kept alive). Removing the source's last pane emits
+        // `Exited`, which closes the now-empty source tab via the deferred effect queue after
+        // this handler returns.
+        let Some(pane) = source_pane_group.update(ctx, |pane_group, ctx| {
+            pane_group.remove_pane_for_move(&pane_id, ctx)
+        }) else {
+            log::error!("merge_tab_into_adjacent: source pane vanished before the move");
+            return;
+        };
+
+        target_pane_group.update(ctx, |pane_group, ctx| {
+            pane_group.add_moved_pane_with_direction(direction, pane, true, ctx);
+        });
+
+        // Drop the soon-to-close source group's id from the input-sync set so it cannot inflate
+        // a future "all tabs synced" collapse. The moved pane re-adopts the target's sync status
+        // on attach, so no sync re-broadcast is needed here.
+        let window_id = ctx.window_id();
+        let live_pane_group_ids: Vec<EntityId> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.pane_group.id())
+            .filter(|id| *id != source_pane_group_id)
+            .collect();
+        SyncedInputState::handle(ctx).update(ctx, |status, _| {
+            status.prune_and_renormalize(window_id, live_pane_group_ids.into_iter());
+        });
+
+        // Activate the target. It may be a hidden member of a collapsed group, which activation
+        // alone does not reveal, so expand it first (mirrors the undo-restore path).
+        if let Some(target_index) = index_of(self, target_pane_group_id) {
+            if let Some(group_id) = self.tabs[target_index].group_id {
+                self.expand_tab_group(group_id, ctx);
+            }
+            self.activate_tab_internal(target_index, ctx);
+        }
+
+        ctx.notify();
+    }
+
     pub(super) fn can_move_tab(&self, index: usize, direction: TabMovement) -> bool {
         let Some(tab) = self.tabs.get(index) else {
             return false;
@@ -23650,6 +23765,38 @@ impl TypedActionView for Workspace {
             MoveActiveTabRight => self.move_tab(self.active_tab_index, TabMovement::Right, ctx),
             MoveTabLeft(index) => self.move_tab(*index, TabMovement::Left, ctx),
             MoveTabRight(index) => self.move_tab(*index, TabMovement::Right, ctx),
+            MergeTabIntoAdjacent {
+                source_pane_group_id,
+                target_pane_group_id,
+                direction,
+            } => self.merge_tab_into_adjacent(
+                *source_pane_group_id,
+                *target_pane_group_id,
+                *direction,
+                ctx,
+            ),
+            MergeActiveTabIntoAdjacent { toward, direction } => {
+                // Resolve the neighbour with bounds checks: the binding's context flags only
+                // hide the palette entry, they do not guard a direct/hotkey dispatch on an edge
+                // tab, so an out-of-range index here must be a silent no-op, not a panic.
+                let target_index = match toward {
+                    TabMovement::Left => self.active_tab_index.checked_sub(1),
+                    TabMovement::Right => {
+                        let next = self.active_tab_index + 1;
+                        (next < self.tabs.len()).then_some(next)
+                    }
+                };
+                if let Some(target_index) = target_index {
+                    let source_pane_group_id = self.active_tab_pane_group().id();
+                    let target_pane_group_id = self.tabs[target_index].pane_group.id();
+                    self.merge_tab_into_adjacent(
+                        source_pane_group_id,
+                        target_pane_group_id,
+                        *direction,
+                        ctx,
+                    );
+                }
+            }
             RenameTab(index) => self.rename_tab(*index, ctx),
             ResetTabName(index) => self.clear_tab_name(*index, ctx),
             RenamePane(locator) => self.rename_pane(*locator, ctx),

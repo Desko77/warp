@@ -294,7 +294,7 @@ impl WorkspaceState {
 }
 
 /// Used to represent left and right movement for tabs in WorkspaceActions
-#[derive(PartialEq, Eq, Clone, Serialize, Deserialize, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Copy)]
 pub enum TabMovement {
     Left,
     Right,

@@ -29,7 +29,7 @@ use crate::auth::auth_manager::LoginGatedFeature;
 use crate::drive::items::WarpDriveItemId;
 use crate::drive::CloudObjectTypeAndId;
 use crate::palette::PaletteMode;
-use crate::pane_group::PaneGroup;
+use crate::pane_group::{Direction, PaneGroup};
 use crate::prompt::editor_modal::OpenSource as PromptEditorOpenSource;
 use crate::search;
 use crate::server::ids::SyncId;
@@ -45,6 +45,7 @@ use crate::themes::theme::AnsiColorIdentifier;
 use crate::themes::theme_chooser::ThemeChooserMode;
 use crate::workflows::{WorkflowSelectionSource, WorkflowSource, WorkflowType};
 use crate::workspace::tab_group::TabGroupId;
+use crate::workspace::util::TabMovement;
 use crate::workspace::PaneViewLocator;
 
 /// This enum determines how the search query is initialized when opening command search.
@@ -136,6 +137,21 @@ pub enum WorkspaceAction {
     MoveActiveTabRight,
     MoveTabLeft(usize),
     MoveTabRight(usize),
+    /// Merge a single-terminal-pane tab into a specific adjacent tab, splitting its live
+    /// session into that tab. Both tabs are addressed by stable pane-group id (not index)
+    /// because tabs may close or reorder while the context menu is open. Raised from the
+    /// tab context menu; `direction` is the split axis in the target.
+    MergeTabIntoAdjacent {
+        source_pane_group_id: EntityId,
+        target_pane_group_id: EntityId,
+        direction: Direction,
+    },
+    /// Merge the active tab into its previous/next neighbour. The palette counterpart of
+    /// `MergeTabIntoAdjacent`; source and target are resolved at dispatch time.
+    MergeActiveTabIntoAdjacent {
+        toward: TabMovement,
+        direction: Direction,
+    },
     RenameTab(usize),
     ResetTabName(usize),
     RenamePane(PaneViewLocator),
@@ -917,6 +933,8 @@ impl WorkspaceAction {
             | MoveActiveTabRight
             | MoveTabLeft(_)
             | MoveTabRight(_)
+            | MergeTabIntoAdjacent { .. }
+            | MergeActiveTabIntoAdjacent { .. }
             | DropTab
             | DropGroup
             | RenameTab(_)

@@ -22,7 +22,7 @@ use warpui::fonts::Weight;
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{Coords, UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
-use warpui::{AppContext, SingletonEntity, ViewHandle};
+use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle};
 
 use crate::ai::agent::conversation::ConversationStatus;
 use crate::ai::conversation_status_ui::{render_status_element, STATUS_ELEMENT_PADDING};
@@ -33,7 +33,7 @@ use crate::editor::EditorView;
 use crate::features::FeatureFlag;
 use crate::launch_configs::launch_config::LaunchConfig;
 use crate::menu::{MenuAction, MenuItem, MenuItemFields};
-use crate::pane_group::{PaneGroup, PaneId};
+use crate::pane_group::{Direction, PaneGroup, PaneId};
 use crate::shell_indicator::ShellIndicatorType;
 use crate::terminal::shared_session::render_util::shared_session_indicator_color;
 use crate::terminal::view::TerminalViewState;
@@ -240,6 +240,8 @@ impl TabData {
         is_only_member_of_group: bool,
         can_move_left: bool,
         can_move_right: bool,
+        previous_merge_target_id: Option<EntityId>,
+        next_merge_target_id: Option<EntityId>,
         ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
         self.menu_items_with_pane_name_target(
@@ -249,6 +251,8 @@ impl TabData {
             is_only_member_of_group,
             can_move_left,
             can_move_right,
+            previous_merge_target_id,
+            next_merge_target_id,
             None,
             ctx,
         )
@@ -263,6 +267,8 @@ impl TabData {
         is_only_member_of_group: bool,
         can_move_left: bool,
         can_move_right: bool,
+        previous_merge_target_id: Option<EntityId>,
+        next_merge_target_id: Option<EntityId>,
         pane_name_target: Option<PaneNameMenuTarget>,
         ctx: &AppContext,
     ) -> Vec<MenuItem<WorkspaceAction>> {
@@ -276,6 +282,7 @@ impl TabData {
             self.session_sharing_menu_items(index, ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
+            self.merge_tab_menu_items(previous_merge_target_id, next_merge_target_id, ctx),
             self.close_tab_menu_items(index, tabs_len, ctx),
             Self::save_config_menu_items(index),
             self.color_option_menu_items(index, terminal_colors),
@@ -537,6 +544,61 @@ impl TabData {
                 .with_on_select_action(WorkspaceAction::MoveTabLeft(index))
                 .into_item(),
             );
+        }
+        menu_items
+    }
+
+    /// "Merge Into ... Tab" entries that fold this tab's single live pane into the
+    /// previous/next tab as a split. Each target id is computed by the caller
+    /// (`Workspace`, which alone can see neighbouring tabs) and is `None` when there is
+    /// no eligible neighbour on that side, in which case that pair is omitted. Both tabs
+    /// are addressed by stable pane-group id so the action survives tabs closing or
+    /// reordering while the menu is open.
+    fn merge_tab_menu_items(
+        &self,
+        previous_merge_target_id: Option<EntityId>,
+        next_merge_target_id: Option<EntityId>,
+        ctx: &AppContext,
+    ) -> Vec<MenuItem<WorkspaceAction>> {
+        let source_pane_group_id = self.pane_group.id();
+        let uses_vertical_tabs = uses_vertical_tabs(ctx);
+        let mut menu_items = vec![];
+
+        let push_pair = |target_id: EntityId,
+                         is_next: bool,
+                         menu_items: &mut Vec<MenuItem<WorkspaceAction>>| {
+            let toward_label = if uses_vertical_tabs {
+                if is_next {
+                    "Tab Below"
+                } else {
+                    "Tab Above"
+                }
+            } else if is_next {
+                "Next Tab"
+            } else {
+                "Previous Tab"
+            };
+            for (direction, axis_label) in [
+                (Direction::Right, "Split Right"),
+                (Direction::Down, "Split Down"),
+            ] {
+                menu_items.push(
+                    MenuItemFields::new(format!("Merge Into {toward_label} ({axis_label})"))
+                        .with_on_select_action(WorkspaceAction::MergeTabIntoAdjacent {
+                            source_pane_group_id,
+                            target_pane_group_id: target_id,
+                            direction,
+                        })
+                        .into_item(),
+                );
+            }
+        };
+
+        if let Some(next_id) = next_merge_target_id {
+            push_pair(next_id, true, &mut menu_items);
+        }
+        if let Some(previous_id) = previous_merge_target_id {
+            push_pair(previous_id, false, &mut menu_items);
         }
         menu_items
     }

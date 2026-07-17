@@ -24,6 +24,7 @@ mod toast_stack;
 pub mod util;
 pub mod view;
 
+use crate::pane_group::Direction;
 pub use action::{
     AutoCloudHandoffTrigger, CommandSearchOptions, InitContent, RestoreConversationLayout,
     TabContextMenuAnchor, VerticalTabsPaneContextMenuTarget, WorkspaceAction,
@@ -882,6 +883,69 @@ pub fn init(app: &mut AppContext) {
                 & !id!("Workspace_PaneDragging"),
         )
         .with_custom_action(CustomAction::MoveTabRight),
+        // Merge the active tab's single pane into a neighbour tab as a split. No default
+        // keystroke - shown in the command palette and assignable in Settings -> Keyboard.
+        // Non-mergeable active tabs (splits, non-terminals) are gated at dispatch, not here.
+        EditableBinding::new(
+            "workspace:merge_tab_into_next_split_right",
+            "Merge tab into next tab (split right)",
+            WorkspaceAction::MergeActiveTabIntoAdjacent {
+                toward: TabMovement::Right,
+                direction: Direction::Right,
+            },
+        )
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(
+            id!("Workspace")
+                & id!("Workspace_MultipleTabs")
+                & !id!("Workspace_RightmostTabActive")
+                & !id!("Workspace_PaneDragging"),
+        ),
+        EditableBinding::new(
+            "workspace:merge_tab_into_next_split_down",
+            "Merge tab into next tab (split down)",
+            WorkspaceAction::MergeActiveTabIntoAdjacent {
+                toward: TabMovement::Right,
+                direction: Direction::Down,
+            },
+        )
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(
+            id!("Workspace")
+                & id!("Workspace_MultipleTabs")
+                & !id!("Workspace_RightmostTabActive")
+                & !id!("Workspace_PaneDragging"),
+        ),
+        EditableBinding::new(
+            "workspace:merge_tab_into_previous_split_right",
+            "Merge tab into previous tab (split right)",
+            WorkspaceAction::MergeActiveTabIntoAdjacent {
+                toward: TabMovement::Left,
+                direction: Direction::Right,
+            },
+        )
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(
+            id!("Workspace")
+                & id!("Workspace_MultipleTabs")
+                & !id!("Workspace_LeftmostTabActive")
+                & !id!("Workspace_PaneDragging"),
+        ),
+        EditableBinding::new(
+            "workspace:merge_tab_into_previous_split_down",
+            "Merge tab into previous tab (split down)",
+            WorkspaceAction::MergeActiveTabIntoAdjacent {
+                toward: TabMovement::Left,
+                direction: Direction::Down,
+            },
+        )
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_context_predicate(
+            id!("Workspace")
+                & id!("Workspace_MultipleTabs")
+                & !id!("Workspace_LeftmostTabActive")
+                & !id!("Workspace_PaneDragging"),
+        ),
         EditableBinding::new(
             "workspace:toggle_keybindings_page",
             "Toggle keyboard shortcuts",

@@ -3318,3 +3318,117 @@ fn decide_remote_child_hydration_empty_token_falls_back() {
         );
     }
 }
+
+// Tests for the tab-merge building blocks: `sole_tree_pane_id`, `add_moved_pane_with_direction`,
+// and the last-pane branch of `remove_pane_for_move`.
+
+#[test]
+fn test_sole_tree_pane_id_returns_single_visible_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, _ctx| {
+            let only_pane = get_newly_created_pane_id(panes, &[]);
+            assert_eq!(panes.sole_tree_pane_id(), Some(only_pane));
+        });
+    });
+}
+
+#[test]
+fn test_sole_tree_pane_id_none_for_split() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            panes.add_terminal_pane(Direction::Right, None, ctx);
+            assert_eq!(panes.pane_count(), 2);
+            assert_eq!(panes.sole_tree_pane_id(), None);
+        });
+    });
+}
+
+#[test]
+fn test_sole_tree_pane_id_none_with_off_tree_child_agent_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let parent_pane_id = get_newly_created_pane_id(panes, &[]);
+            // One visible leaf, but an extra off-tree pane lives in `pane_contents`.
+            panes.insert_terminal_pane_hidden_for_child_agent(
+                parent_pane_id,
+                HashMap::new(),
+                IsSharedSessionCreator::No,
+                ctx,
+            );
+
+            assert_eq!(panes.pane_count(), 1);
+            assert!(panes.pane_ids().count() > 1);
+            assert_eq!(panes.sole_tree_pane_id(), None);
+        });
+    });
+}
+
+#[test]
+fn test_add_moved_pane_with_direction_keeps_live_pane() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let source = mock_pane_group(&mut app, Default::default());
+        let target = mock_pane_group(&mut app, Default::default());
+
+        // Keep the source alive with a second pane so removing one does not empty it.
+        let moved_pane_id = source.update(&mut app, |panes, ctx| {
+            let first = get_newly_created_pane_id(panes, &[]);
+            panes.add_terminal_pane(Direction::Right, None, ctx);
+            get_newly_created_pane_id(panes, &[first])
+        });
+
+        let moved = source
+            .update(&mut app, |panes, ctx| {
+                panes.remove_pane_for_move(&moved_pane_id, ctx)
+            })
+            .expect("pane should be extracted live");
+
+        target.update(&mut app, |panes, ctx| {
+            panes.add_moved_pane_with_direction(Direction::Right, moved, true, ctx);
+
+            assert_eq!(panes.pane_count(), 2);
+            assert!(
+                panes.pane_ids().any(|id| id == moved_pane_id),
+                "the moved pane keeps its original id (session not recreated)"
+            );
+            assert_eq!(panes.focused_pane_id(ctx), moved_pane_id);
+            assert!(
+                panes.has_horizontal_split(),
+                "Right insert is a column split"
+            );
+        });
+    });
+}
+
+#[test]
+fn test_remove_pane_for_move_last_pane_extracts_live_content() {
+    App::test((), |mut app| async move {
+        initialize_app(&mut app);
+        let pane_group = mock_pane_group(&mut app, Default::default());
+
+        pane_group.update(&mut app, |panes, ctx| {
+            let only_pane = get_newly_created_pane_id(panes, &[]);
+
+            let extracted = panes.remove_pane_for_move(&only_pane, ctx);
+
+            assert!(
+                extracted.is_some(),
+                "the last pane is handed back for moving, not dropped"
+            );
+            assert_eq!(
+                panes.pane_ids().count(),
+                0,
+                "pane_contents is emptied even though a ghost leaf remains until Exited"
+            );
+        });
+    });
+}
